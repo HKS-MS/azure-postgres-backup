@@ -27,6 +27,184 @@ Custom-format database dumps do not include cluster-wide roles or server configu
 
 The backup uses `pg_dump`'s consistent single-database snapshot and does not modify the source database. Blob objects include SHA-256, byte count, server, database, timestamp, and PostgreSQL client version metadata.
 
+## Container Image & Public Registry
+
+A pre-built container image is published and maintained on GitHub Container Registry (GHCR):
+
+```text
+ghcr.io/hks-ms/azure-postgres-backup:latest
+```
+
+This image is publicly accessible and can be pulled directly by Azure Container Apps without configuring registry credentials.
+
+---
+
+## Environment Variables Reference
+
+The backup job container requires the following environment variables:
+
+| Variable | Required | Default | Description | Example |
+| :--- | :---: | :---: | :--- | :--- |
+| `PGHOST` | **Yes** | — | Fully qualified domain name of the PostgreSQL server | `pgsample89126.postgres.database.azure.com` |
+| `PGPORT` | No | `5432` | PostgreSQL server port | `5432` |
+| `PGDATABASE` | **Yes** | — | Name of the database to back up (`salesdb`) | `salesdb` |
+| `PGUSER` | **Yes** | — | PostgreSQL username or Entra ID Managed Identity name | `id-salesdb-dev-132d` |
+| `BLOB_ACCOUNT_URL` | **Yes** | — | Primary blob endpoint URL of the Azure Storage account | `https://mystorageaccount.blob.core.windows.net` |
+| `BLOB_CONTAINER` | **Yes** | — | Name of the target Blob Storage container | `postgres-backups` |
+| `AZURE_CLIENT_ID` | Conditional | — | Client ID of the User-Assigned Managed Identity (required if using User-Assigned Managed Identity) | `f3a46849-2134-4301-9714-12511fbdd28a` |
+| `PGPASSWORD` | No | — | Database password. **Leave unset in Azure** to automatically use passwordless Microsoft Entra ID authentication via Managed Identity | `my-secret-password` (local dev only) |
+| `PGSSLMODE` | No | `verify-full` | SSL verification mode. Must be `verify-full` for secure connections | `verify-full` |
+| `PGSSLROOTCERT` | No | `system` | Path to SSL root CA certificates or `system` | `system` |
+
+---
+
+## Deploying to Azure Container Apps (Step-by-Step)
+
+Follow these steps to deploy and run the backup image in any Azure subscription using Azure CLI.
+
+### Prerequisites
+
+- Azure CLI (`az`) installed and authenticated (`az login`)
+- An existing Azure PostgreSQL Flexible Server with Microsoft Entra ID authentication enabled
+- An Azure Storage Account with a blob container for backups
+
+### Step 1: Create Resource Group & Managed Identity
+
+```powershell
+$RESOURCE_GROUP = "rg-postgres-backup"
+$LOCATION = "westeurope"
+$IDENTITY_NAME = "id-postgres-backup"
+
+# Create Resource Group
+az group create --name $RESOURCE_GROUP --location $LOCATION
+
+# Create User-Assigned Managed Identity
+az identity create --name $IDENTITY_NAME --resource-group $RESOURCE_GROUP
+
+# Retrieve Identity IDs
+$IDENTITY_ID = az identity show --name $IDENTITY_NAME --resource-group $RESOURCE_GROUP --query id -o tsv
+$CLIENT_ID = az identity show --name $IDENTITY_NAME --resource-group $RESOURCE_GROUP --query clientId -o tsv
+$PRINCIPAL_ID = az identity show --name $IDENTITY_NAME --resource-group $RESOURCE_GROUP --query principalId -o tsv
+```
+
+### Step 2: Grant Permissions to Managed Identity
+
+#### A. Grant Storage Blob Data Contributor on Azure Storage
+```powershell
+$STORAGE_ACCOUNT = "mystorageaccount"
+$STORAGE_ID = az storage account show --name $STORAGE_ACCOUNT --query id -o tsv
+
+az role assignment create `
+  --assignee-object-id $PRINCIPAL_ID `
+  --assignee-principal-type ServicePrincipal `
+  --role "Storage Blob Data Contributor" `
+  --scope $STORAGE_ID
+```
+
+#### B. Grant Entra ID Access on Azure PostgreSQL Flexible Server
+```powershell
+$PG_SERVER = "pgsample89126"
+
+az postgres flexible-server ad-admin create `
+  --resource-group $RESOURCE_GROUP `
+  --server-name $PG_SERVER `
+  --display-name $IDENTITY_NAME `
+  --object-id $PRINCIPAL_ID `
+  --type ServicePrincipal
+```
+
+### Step 3: Create Log Analytics Workspace & Container Apps Environment
+
+```powershell
+$WORKSPACE_NAME = "log-postgres-backup"
+$ENVIRONMENT_NAME = "cae-postgres-backup"
+
+# Create Log Analytics Workspace
+az monitor log-analytics workspace create `
+  --resource-group $RESOURCE_GROUP `
+  --workspace-name $WORKSPACE_NAME `
+  --location $LOCATION
+
+$WORKSPACE_CUSTOMER_ID = az monitor log-analytics workspace show `
+  --resource-group $RESOURCE_GROUP `
+  --workspace-name $WORKSPACE_NAME `
+  --query customerId -o tsv
+
+$WORKSPACE_KEY = az monitor log-analytics workspace get-shared-keys `
+  --resource-group $RESOURCE_GROUP `
+  --workspace-name $WORKSPACE_NAME `
+  --query primarySharedKey -o tsv
+
+# Create Container Apps Managed Environment
+az containerapp env create `
+  --name $ENVIRONMENT_NAME `
+  --resource-group $RESOURCE_GROUP `
+  --location $LOCATION `
+  --logs-workspace-id $WORKSPACE_CUSTOMER_ID `
+  --logs-workspace-key $WORKSPACE_KEY
+```
+
+### Step 4: Create Scheduled Container Apps Job
+
+Run the public GHCR image on a daily schedule (e.g. `0 2 * * *` for 02:00 UTC):
+
+```powershell
+$JOB_NAME = "job-postgres-backup"
+$IMAGE = "ghcr.io/hks-ms/azure-postgres-backup:latest"
+$PG_HOST = "$PG_SERVER.postgres.database.azure.com"
+$BLOB_URL = "https://$STORAGE_ACCOUNT.blob.core.windows.net"
+
+az containerapp job create `
+  --name $JOB_NAME `
+  --resource-group $RESOURCE_GROUP `
+  --environment $ENVIRONMENT_NAME `
+  --trigger-type Schedule `
+  --cron-expression "0 2 * * *" `
+  --replica-timeout 3600 `
+  --replica-retry-limit 1 `
+  --image $IMAGE `
+  --cpu 0.5 `
+  --memory 1.0Gi `
+  --user-assigned $IDENTITY_ID `
+  --command "python3" "-m" "src.backup" `
+  --env-vars `
+    PGHOST=$PG_HOST `
+    PGPORT="5432" `
+    PGDATABASE="salesdb" `
+    PGUSER=$IDENTITY_NAME `
+    PGSSLMODE="verify-full" `
+    PGSSLROOTCERT="system" `
+    BLOB_ACCOUNT_URL=$BLOB_URL `
+    BLOB_CONTAINER="postgres-backups" `
+    AZURE_CLIENT_ID=$CLIENT_ID
+```
+
+### Step 5: Test Execution and View Logs
+
+Trigger a manual execution immediately:
+
+```powershell
+# Start Job Execution
+az containerapp job start --name $JOB_NAME --resource-group $RESOURCE_GROUP
+
+# List executions and check status
+az containerapp job execution list --name $JOB_NAME --resource-group $RESOURCE_GROUP -o table
+
+# Stream live container console logs
+az containerapp job logs show --name $JOB_NAME --resource-group $RESOURCE_GROUP --follow
+```
+
+Or query the Log Analytics workspace:
+
+```powershell
+az monitor log-analytics query `
+  -w $WORKSPACE_CUSTOMER_ID `
+  --analytics-query "ContainerAppConsoleLogs_CL | where ContainerJobName_s == '$JOB_NAME' | project TimeGenerated, Log_s | order by TimeGenerated desc" `
+  -t PT1H -o table
+```
+
+---
+
 ## Container and Azure schedule
 
 `Dockerfile` packages PostgreSQL 16 and the Python uploader, running as a non-root user. `.dockerignore` permits only the Dockerfile, dependency manifest, and application source into the build context. Local `.env`, credential files, virtual environments and onboarding artifacts are excluded.
