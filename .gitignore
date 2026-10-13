@@ -1,0 +1,6 @@
+.copilot-azure/
+.env
+*.dump
+*.backup
+__pycache__/
+.venv/
