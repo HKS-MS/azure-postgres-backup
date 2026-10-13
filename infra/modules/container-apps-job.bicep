@@ -9,7 +9,8 @@ param acrLoginServer string
 param containerImage string
 param deployJob bool
 param postgresHost string
-param postgresUser string = 'id-salesdb-dev-132d'
+param postgresUser string
+param databaseName string = 'mydb'
 param storageAccountUrl string
 param storageContainer string
 
@@ -44,7 +45,7 @@ resource job 'Microsoft.App/jobs@2026-07-01' = if (deployJob) {
     template: {
       containers: [
         {
-          name: 'salesdb-backup'
+          name: 'postgres-backup'
           image: containerImage
           command: [
             'python3'
@@ -58,7 +59,7 @@ resource job 'Microsoft.App/jobs@2026-07-01' = if (deployJob) {
           env: [
             { name: 'PGHOST', value: postgresHost }
             { name: 'PGPORT', value: '5432' }
-            { name: 'PGDATABASE', value: 'salesdb' }
+            { name: 'PGDATABASE', value: databaseName }
             { name: 'PGUSER', value: postgresUser }
             { name: 'PGSSLMODE', value: 'verify-full' }
             { name: 'PGSSLROOTCERT', value: 'system' }

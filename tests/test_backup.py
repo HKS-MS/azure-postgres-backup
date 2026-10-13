@@ -12,13 +12,13 @@ from src.backup import BackupConfig, POSTGRES_ENTRA_SCOPE, run_backup
 
 def make_config(**overrides):
     values = {
-        "host": "pgsample89126.postgres.database.azure.com",
+        "host": "my-postgres-server.postgres.database.azure.com",
         "port": 5432,
-        "database": "salesdb",
-        "user": "id-salesdb-dev-132d",
+        "database": "sampledb",
+        "user": "id-backup-identity",
         "sslmode": "verify-full",
         "sslrootcert": "system",
-        "blob_account_url": "https://stsalesdbdev132d.blob.core.windows.net",
+        "blob_account_url": "https://mystorageaccount.blob.core.windows.net",
         "blob_container": "postgres-backups",
         "password": "test-password",
     }
@@ -27,21 +27,21 @@ def make_config(**overrides):
 
 
 class BackupTests(unittest.TestCase):
-    def test_config_requires_single_database(self):
+    def test_config_requires_valid_database(self):
         base = {
             "PGHOST": "server",
             "PGPORT": "5432",
-            "PGUSER": "id-salesdb-dev-132d",
-            "PGDATABASE": "salesdb",
+            "PGUSER": "id-backup-identity",
+            "PGDATABASE": "sampledb",
             "BLOB_ACCOUNT_URL": "https://storage.example",
             "BLOB_CONTAINER": "backups",
         }
         config = BackupConfig.from_env(base)
-        self.assertEqual(config.database, "salesdb")
+        self.assertEqual(config.database, "sampledb")
         self.assertEqual(config.sslmode, "verify-full")
         self.assertIsNone(config.password)
         with self.assertRaises(ValueError):
-            BackupConfig.from_env({**base, "PGDATABASE": "postgres"})
+            BackupConfig.from_env({**base, "PGDATABASE": "invalid db name with spaces!"})
         with self.assertRaises(ValueError):
             BackupConfig.from_env({**base, "PGPORT": "invalid"})
 
@@ -82,10 +82,10 @@ class BackupTests(unittest.TestCase):
             return SimpleNamespace(stdout="")
 
         name, uploaded, client, credential = self._run(subprocess_run=fake_run)
-        self.assertEqual(name, "salesdb/salesdb_20261013_100000.dump")
+        self.assertEqual(name, "sampledb/sampledb_20261013_100000.dump")
         dump_args = calls[0][0]
-        self.assertEqual(dump_args[dump_args.index("--dbname") + 1], "salesdb")
-        self.assertTrue(dump_args[dump_args.index("--file") + 1].endswith("salesdb_20261013_100000.dump"))
+        self.assertEqual(dump_args[dump_args.index("--dbname") + 1], "sampledb")
+        self.assertTrue(dump_args[dump_args.index("--file") + 1].endswith("sampledb_20261013_100000.dump"))
         self.assertIn("--format=custom", dump_args)
         self.assertEqual(calls[0][1]["env"]["PGPASSWORD"], "test-password")
         self.assertEqual(calls[1][0][:2], ["pg_restore", "--list"])
@@ -93,7 +93,7 @@ class BackupTests(unittest.TestCase):
         metadata = uploaded["kwargs"]["metadata"]
         self.assertEqual(metadata["sha256"], hashlib.sha256(b"valid archive").hexdigest())
         self.assertEqual(metadata["bytes"], str(len(b"valid archive")))
-        self.assertEqual(metadata["database"], "salesdb")
+        self.assertEqual(metadata["database"], "sampledb")
         self.assertEqual(metadata["pg_version"], "pg_dump (PostgreSQL) 16.4 (Debian 16.4-1.pgdg120+1)")
         self.assertFalse(uploaded["kwargs"]["overwrite"])
         credential.close.assert_called_once()

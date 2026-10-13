@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping
 
-DATABASE_NAME = "salesdb"
 POSTGRES_ENTRA_SCOPE = "https://ossrdbms-aad.database.windows.net/.default"
 
 
@@ -47,8 +46,8 @@ class BackupConfig:
             raise ValueError("PGPORT must be between 1 and 65535")
 
         database = required("PGDATABASE")
-        if database != DATABASE_NAME:
-            raise ValueError(f"This job is restricted to the {DATABASE_NAME} database")
+        if not re.fullmatch(r"^[a-zA-Z0-9_-]+$", database):
+            raise ValueError("PGDATABASE contains invalid characters")
 
         sslmode = env.get("PGSSLMODE", "verify-full").strip()
         if sslmode != "verify-full":
@@ -98,9 +97,9 @@ def _sha256_and_size(path: Path) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
-def _backup_key(now: datetime) -> str:
+def _backup_key(database: str, now: datetime) -> str:
     stamp = now.astimezone(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    return f"{DATABASE_NAME}/{DATABASE_NAME}_{stamp}.dump"
+    return f"{database}/{database}_{stamp}.dump"
 
 
 def run_backup(
@@ -138,7 +137,7 @@ def run_backup(
         )
 
         backed_up_at = clock().astimezone(timezone.utc)
-        blob_name = _backup_key(backed_up_at)
+        blob_name = _backup_key(config.database, backed_up_at)
         archive_filename = Path(blob_name).name
 
         with temp_dir_factory(prefix="pg-backup-") as temp_dir:
@@ -155,7 +154,7 @@ def run_backup(
                     "--username",
                     config.user,
                     "--dbname",
-                    DATABASE_NAME,
+                    config.database,
                     "--file",
                     str(archive_path),
                 ],
@@ -196,7 +195,7 @@ def run_backup(
                     metadata={
                         "sha256": digest,
                         "bytes": str(size),
-                        "database": DATABASE_NAME,
+                        "database": config.database,
                         "server": config.host,
                         "backed_up_at": backed_up_at.isoformat(),
                         "pg_version": version,

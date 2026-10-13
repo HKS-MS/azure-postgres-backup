@@ -44,7 +44,7 @@ resource managementPolicy 'Microsoft.Storage/storageAccounts/managementPolicies@
     policy: {
       rules: [
         {
-          name: 'delete-salesdb-backups-after-30-days'
+          name: 'delete-backups-after-30-days'
           enabled: true
           type: 'Lifecycle'
           definition: {
@@ -53,7 +53,7 @@ resource managementPolicy 'Microsoft.Storage/storageAccounts/managementPolicies@
                 'blockBlob'
               ]
               prefixMatch: [
-                'postgres-backups/salesdb/'
+                'postgres-backups/'
               ]
             }
             actions: {

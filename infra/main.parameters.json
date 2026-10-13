@@ -2,12 +2,12 @@
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
   "contentVersion": "1.0.0.0",
   "parameters": {
-    "environmentName": { "value": "salesdb-dev-132d" },
+    "environmentName": { "value": "pg-backup" },
     "location": { "value": "westeurope" },
-    "sessionId": { "value": "132d73c3-85cd-4d9d-8c40-57258b49eaae" },
-    "deployedBy": { "value": "Hassan Hassanein" },
-    "createdAt": { "value": "2026-10-13T14:01:31.2173526+03:00" },
+    "resourceGroupName": { "value": "rg-postgres-backup" },
+    "postgresHost": { "value": "my-postgres-server.postgres.database.azure.com" },
+    "databaseName": { "value": "mydb" },
     "deployJob": { "value": false },
-    "containerImage": { "value": "crsalesdbdev132d.azurecr.io/postgres-backup:v2" }
+    "containerImage": { "value": "ghcr.io/hks-ms/azure-postgres-backup:latest" }
   }
 }

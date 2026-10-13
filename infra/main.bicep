@@ -2,34 +2,39 @@ targetScope = 'subscription'
 
 @minLength(1)
 @maxLength(64)
-param environmentName string
+param environmentName string = 'pg-backup'
 @minLength(1)
-param location string
-param sessionId string
-param deployedBy string
-param createdAt string
+param location string = 'westeurope'
+param resourceGroupName string = 'rg-postgres-backup'
+param postgresHost string = 'my-postgres-server.postgres.database.azure.com'
+param databaseName string = 'mydb'
 param deployJob bool = false
 @minLength(1)
-param containerImage string = 'crsalesdbdev132d.azurecr.io/postgres-backup:v2'
+param containerImage string = 'ghcr.io/hks-ms/azure-postgres-backup:latest'
+
+var uniqueSuffix = uniqueString(subscription().id, environmentName, location)
+var managedIdentityName = 'id-${environmentName}'
+var acrName = 'cr${take(replace(environmentName, '-', ''), 14)}${take(uniqueSuffix, 6)}'
+var storageAccountName = 'st${take(replace(environmentName, '-', ''), 14)}${take(uniqueSuffix, 6)}'
+var logAnalyticsName = 'log-${environmentName}'
+var caeName = 'cae-${environmentName}'
+var jobName = 'job-${environmentName}'
 
 var tags = {
-  'app-onboard-skill': 'true'
-  'app-onboard-session-id': sessionId
-  'created-at': createdAt
   environment: environmentName
-  'deployed-by': deployedBy
+  workload: 'postgres-backup'
   SecurityControl: 'Ignore'
 }
 
 resource rg 'Microsoft.Resources/resourceGroups@2023-07-01' existing = {
-  name: 'rg-pg-sample'
+  name: resourceGroupName
 }
 
 module identity './modules/managed-identity.bicep' = {
   name: 'managed-identity'
   scope: rg
   params: {
-    identityName: 'id-salesdb-dev-132d'
+    identityName: managedIdentityName
     location: location
     tags: tags
   }
@@ -39,7 +44,7 @@ module acr './modules/container-registry.bicep' = {
   name: 'container-registry'
   scope: rg
   params: {
-    registryName: 'crsalesdbdev132d'
+    registryName: acrName
     location: location
     tags: tags
   }
@@ -49,7 +54,7 @@ module storage './modules/storage.bicep' = {
   name: 'storage'
   scope: rg
   params: {
-    storageName: 'stsalesdbdev132d'
+    storageName: storageAccountName
     location: location
     tags: tags
   }
@@ -59,7 +64,7 @@ module logAnalytics './modules/log-analytics.bicep' = {
   name: 'log-analytics'
   scope: rg
   params: {
-    workspaceName: 'log-salesdb-dev-132d'
+    workspaceName: logAnalyticsName
     location: location
     tags: tags
   }
@@ -72,10 +77,10 @@ module environment './modules/container-apps-environment.bicep' = {
     logAnalytics
   ]
   params: {
-    environmentName: 'cae-salesdb-dev-132d'
+    environmentName: caeName
     location: location
     tags: tags
-    workspaceName: 'log-salesdb-dev-132d'
+    workspaceName: logAnalyticsName
   }
 }
 
@@ -86,7 +91,7 @@ module job './modules/container-apps-job.bicep' = {
     roleAssignments
   ]
   params: {
-    jobName: 'job-salesdb-dev-132d'
+    jobName: jobName
     location: location
     tags: tags
     managedEnvironmentId: environment.outputs.id
@@ -95,8 +100,9 @@ module job './modules/container-apps-job.bicep' = {
     acrLoginServer: acr.outputs.loginServer
     containerImage: containerImage
     deployJob: deployJob
-    postgresHost: 'pgsample89126.postgres.database.azure.com'
-    postgresUser: 'id-salesdb-dev-132d'
+    postgresHost: postgresHost
+    postgresUser: managedIdentityName
+    databaseName: databaseName
     storageAccountUrl: storage.outputs.blobEndpoint
     storageContainer: 'postgres-backups'
   }
@@ -111,8 +117,8 @@ module roleAssignments './modules/role-assignments.bicep' = {
   ]
   params: {
     identityPrincipalId: identity.outputs.principalId
-    registryName: 'crsalesdbdev132d'
-    storageName: 'stsalesdbdev132d'
+    registryName: acrName
+    storageName: storageAccountName
     storageContainerName: 'postgres-backups'
   }
 }

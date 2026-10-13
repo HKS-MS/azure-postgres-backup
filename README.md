@@ -1,6 +1,6 @@
 # PostgreSQL Backup Job
 
-A scheduled-job application that creates a verified custom-format backup of the `salesdb` PostgreSQL database and uploads it to Azure Blob Storage using managed identity.
+A scheduled-job application that creates a verified custom-format backup of a PostgreSQL database and uploads it to Azure Blob Storage using managed identity.
 
 ## Run locally
 
@@ -13,14 +13,14 @@ $env:PGPASSWORD = "your-database-password"
 python -m src.backup
 ```
 
-The process exits with status 0 after a successful upload and nonzero on failure. It writes one object under `salesdb/` named `salesdb_<YYYYMMDD_HHMMSS>.dump`. No password or exception details are written to logs.
+The process exits with status 0 after a successful upload and nonzero on failure. It writes one object under `<database>/` named `<database>_<YYYYMMDD_HHMMSS>.dump`. No password or exception details are written to logs.
 
 ## Restore
 
 Download a `.dump` object and restore it into a **separate, empty database** with `pg_restore`, for example:
 
 ```powershell
-pg_restore --host <server> --username <user> --dbname <separate-database> --no-owner .\salesdb.dump
+pg_restore --host <server> --username <user> --dbname <separate-database> --no-owner .\mydb.dump
 ```
 
 Custom-format database dumps do not include cluster-wide roles or server configuration. Create required roles separately before restoring if ownership or privileges depend on them.
@@ -45,13 +45,13 @@ The backup job container requires the following environment variables:
 
 | Variable | Required | Default | Description | Example |
 | :--- | :---: | :---: | :--- | :--- |
-| `PGHOST` | **Yes** | — | Fully qualified domain name of the PostgreSQL server | `pgsample89126.postgres.database.azure.com` |
+| `PGHOST` | **Yes** | — | Fully qualified domain name of the PostgreSQL server | `my-postgres-server.postgres.database.azure.com` |
 | `PGPORT` | No | `5432` | PostgreSQL server port | `5432` |
-| `PGDATABASE` | **Yes** | — | Name of the database to back up (`salesdb`) | `salesdb` |
-| `PGUSER` | **Yes** | — | PostgreSQL username or Entra ID Managed Identity name | `id-salesdb-dev-132d` |
+| `PGDATABASE` | **Yes** | — | Name of the database to back up | `mydb` |
+| `PGUSER` | **Yes** | — | PostgreSQL username or Entra ID Managed Identity name | `id-postgres-backup` |
 | `BLOB_ACCOUNT_URL` | **Yes** | — | Primary blob endpoint URL of the Azure Storage account | `https://mystorageaccount.blob.core.windows.net` |
 | `BLOB_CONTAINER` | **Yes** | — | Name of the target Blob Storage container | `postgres-backups` |
-| `AZURE_CLIENT_ID` | Conditional | — | Client ID of the User-Assigned Managed Identity (required if using User-Assigned Managed Identity) | `f3a46849-2134-4301-9714-12511fbdd28a` |
+| `AZURE_CLIENT_ID` | Conditional | — | Client ID of the User-Assigned Managed Identity (required if using User-Assigned Managed Identity) | `00000000-0000-0000-0000-000000000000` |
 | `PGPASSWORD` | No | — | Database password. **Leave unset in Azure** to automatically use passwordless Microsoft Entra ID authentication via Managed Identity | `my-secret-password` (local dev only) |
 | `PGSSLMODE` | No | `verify-full` | SSL verification mode. Must be `verify-full` for secure connections | `verify-full` |
 | `PGSSLROOTCERT` | No | `system` | Path to SSL root CA certificates or `system` | `system` |
@@ -103,7 +103,7 @@ az role assignment create `
 
 #### B. Grant Entra ID Access on Azure PostgreSQL Flexible Server
 ```powershell
-$PG_SERVER = "pgsample89126"
+$PG_SERVER = "my-postgres-server"
 
 az postgres flexible-server ad-admin create `
   --resource-group $RESOURCE_GROUP `
@@ -170,7 +170,7 @@ az containerapp job create `
   --env-vars `
     PGHOST=$PG_HOST `
     PGPORT="5432" `
-    PGDATABASE="salesdb" `
+    PGDATABASE="mydb" `
     PGUSER=$IDENTITY_NAME `
     PGSSLMODE="verify-full" `
     PGSSLROOTCERT="system" `
@@ -207,121 +207,117 @@ az monitor log-analytics query `
 
 ## Container and Azure schedule
 
-`Dockerfile` packages PostgreSQL 16 and the Python uploader, running as a non-root user. `.dockerignore` permits only the Dockerfile, dependency manifest, and application source into the build context. Local `.env`, credential files, virtual environments and onboarding artifacts are excluded.
+`Dockerfile` packages PostgreSQL 16 and the Python uploader, running as a non-root user. `.dockerignore` permits only the Dockerfile, dependency manifest, and application source into the build context. Local `.env`, credential files, and virtual environments are excluded.
 
-The Bicep templates in `infra` target the existing `rg-pg-sample` resource group and do not modify the source PostgreSQL server or firewall. They create an Azure Container Apps scheduled Job with cron `0 2 * * *` (daily 02:00 UTC / 05:00 UTC+3), a one-hour timeout and one retry. Blob lifecycle deletes backups older than 30 days asynchronously. Storage uses LRS.
+The Bicep templates in `infra` deploy to an Azure resource group and create an Azure Container Apps scheduled Job with cron `0 2 * * *` (daily 02:00 UTC), a one-hour timeout, and one retry. Blob lifecycle deletes backups older than 30 days asynchronously. Storage uses LRS.
 
 The architecture uses pure **User-Assigned Managed Identity**:
 1. **PostgreSQL Authentication**: In Container Apps, `DefaultAzureCredential` obtains an Entra ID OAuth access token (`https://ossrdbms-aad.database.windows.net/.default`) which is passed as `PGPASSWORD` to `pg_dump`. Zero stored credentials, no Key Vault required.
 2. **Blob Storage**: The managed identity is granted `Storage Blob Data Contributor` on the container, enabling passwordless upload via Azure RBAC.
-3. **Container Registry**: The managed identity is granted `AcrPull` on the ACR.
-4. **Container Apps Environment & Monitoring**: Configured with Log Analytics workspace `log-salesdb-dev-132d`. System events stream into `ContainerAppSystemLogs_CL` and backup execution stdout/stderr streams into `ContainerAppConsoleLogs_CL`. Logs can also be queried via `az containerapp job logs show`.
+3. **Container Registry**: The managed identity is granted `AcrPull` on the ACR (or pulls freely from the public GHCR image).
+4. **Container Apps Environment & Monitoring**: Configured with Log Analytics workspace. System events stream into `ContainerAppSystemLogs_CL` and backup execution stdout/stderr streams into `ContainerAppConsoleLogs_CL`. Logs can also be queried via `az containerapp job logs show`.
 
-Deployment is two-phase: create supporting resources with `deployJob=false`, build the image in Azure Container Registry, configure Entra ID authentication for the managed identity on the PostgreSQL server, then redeploy with `deployJob=true` and the actual private ACR image.
+## Deploying via Bicep (PowerShell)
 
-Deployment requires explicit approval and verified regional quota. `Microsoft.App` was unregistered during preparation; quota must be rechecked after registration. The existing PostgreSQL firewall permits all Azure services, not only this job; the templates do not widen that rule.
-
-Validate deployment by starting an actual execution, verifying a stored archive and checksum, and restoring into a disposable isolated PostgreSQL 16 instance. `pg_restore --list` is an archive-readability check, not a full restore test. Job failure status and logs are available via `az containerapp job logs show`.
-
-## Manual deployment (PowerShell)
-
-No Azure resources have been provisioned and no image has been built by this project. Run the following steps yourself from this folder. Requires Azure CLI, Bicep (`az bicep install` if missing), and permission to deploy resources and assign roles. Check each command's exit status before continuing. Do not delete the existing resource group: it contains the source PostgreSQL server.
+Run the following steps to deploy the complete infrastructure via Bicep. Check each command's exit status before continuing.
 
 ### 1. Select the subscription and check capacity
 
 ```powershell
-az account set --subscription b2ddaf7a-f872-44d1-957e-6e0554338537
-az account show --query "{subscription:name,user:user.name}" -o json
+$SUBSCRIPTION_ID = "<your-subscription-id>"
+$LOCATION = "westeurope"
+
+az account set --subscription $SUBSCRIPTION_ID
 
 foreach ($provider in @(
-  "Microsoft.App", "Microsoft.ContainerRegistry", "Microsoft.Storage", "Microsoft.ManagedIdentity"
+  "Microsoft.App", "Microsoft.ContainerRegistry", "Microsoft.Storage", "Microsoft.ManagedIdentity", "Microsoft.OperationalInsights"
 )) {
   az provider register --namespace $provider --wait
-  if ($LASTEXITCODE -ne 0) { throw "Provider registration failed: $provider" }
 }
-
-az rest --method get --url "https://management.azure.com/subscriptions/b2ddaf7a-f872-44d1-957e-6e0554338537/providers/Microsoft.App/locations/westeurope/usages?api-version=2024-03-01" --query "value[].{name:name.value,used:currentValue,limit:limit}" -o table
 ```
 
-Check `ManagedEnvironmentCount` and the applicable Consumption core quotas after registration. **Stop if environment capacity is zero/full or cores are insufficient.** Request quota through Azure support/portal rather than silently switching regions.
-
-### 2. Review and deploy supporting resources
-
-The initial deployment does not create a scheduled job. The image reference is non-empty but is not pulled until the second deployment.
+### 2. Review and deploy infrastructure
 
 ```powershell
-$image = "crsalesdbdev132d.azurecr.io/postgres-backup:v1"
+$RESOURCE_GROUP = "rg-postgres-backup"
+az group create --name $RESOURCE_GROUP --location $LOCATION
 
-az deployment sub what-if --location westeurope --template-file .\infra\main.bicep --parameters '@infra/main.parameters.json' deployJob=false containerImage=$image
+az deployment sub what-if `
+  --location $LOCATION `
+  --template-file .\infra\main.bicep `
+  --parameters '@infra/main.parameters.json' `
+  deployJob=false
 
-az deployment sub create --name salesdb-backup-support-132d --location westeurope --template-file .\infra\main.bicep --parameters '@infra/main.parameters.json' deployJob=false containerImage=$image
+az deployment sub create `
+  --name "postgres-backup-support" `
+  --location $LOCATION `
+  --template-file .\infra\main.bicep `
+  --parameters '@infra/main.parameters.json' `
+  deployJob=false
 ```
 
-Only proceed if what-if shows the intended new backup resources and the deployment succeeds. The existing PostgreSQL server, database, firewall and resource group are not modified. Blob Storage uses LRS and authorization-protected public endpoints.
+### 3. Grant PostgreSQL access to the Managed Identity
 
-### 3. Grant PostgreSQL access to the Managed Identity and build the image
-
-Enable Microsoft Entra ID authentication on Azure Database for PostgreSQL Flexible Server `pgsample89126`:
+Enable Microsoft Entra ID authentication on Azure Database for PostgreSQL Flexible Server:
 
 ```powershell
-# Get the Managed Identity principal ID and client ID
-$identityPrincipalId = az identity show --name id-salesdb-dev-132d --resource-group rg-pg-sample --query principalId -o tsv
-$identityClientId = az identity show --name id-salesdb-dev-132d --resource-group rg-pg-sample --query clientId -o tsv
+$IDENTITY_NAME = "id-pg-backup"
+$PG_SERVER = "my-postgres-server"
 
-# Add Entra administrator or create database role for the identity:
+# Get the Managed Identity principal ID
+$identityPrincipalId = az identity show --name $IDENTITY_NAME --resource-group $RESOURCE_GROUP --query principalId -o tsv
+
+# Add Entra administrator for the identity:
 az postgres flexible-server ad-admin create `
-  --resource-group rg-pg-sample `
-  --server-name pgsample89126 `
-  --display-name "id-salesdb-dev-132d" `
+  --resource-group $RESOURCE_GROUP `
+  --server-name $PG_SERVER `
+  --display-name $IDENTITY_NAME `
   --object-id $identityPrincipalId `
   --type ServicePrincipal
 ```
 
-Build the container image using Azure Container Registry:
+### 4. Enable the schedule and run a backup
 
 ```powershell
-az acr build --registry crsalesdbdev132d --image postgres-backup:v1 --file .\Dockerfile --no-logs .
-az acr repository show --name crsalesdbdev132d --image postgres-backup:v1 --query "{digest:digest,created:createdTime}" -o json
+az deployment sub create `
+  --name "postgres-backup-job" `
+  --location $LOCATION `
+  --template-file .\infra\main.bicep `
+  --parameters '@infra/main.parameters.json' `
+  deployJob=true
+
+$JOB_NAME = "job-pg-backup"
+az containerapp job start --name $JOB_NAME --resource-group $RESOURCE_GROUP
+az containerapp job execution list --name $JOB_NAME --resource-group $RESOURCE_GROUP --query "[].{name:name,status:properties.status,start:properties.startTime,end:properties.endTime}" -o table
 ```
 
-Wait for ACR build success. For immutable deployments, set `$image` to `crsalesdbdev132d.azurecr.io/postgres-backup@sha256:<digest>` using the returned digest.
-
-### 4. Enable the schedule and run a backup now
-
-```powershell
-az deployment sub what-if --location westeurope --template-file .\infra\main.bicep --parameters '@infra/main.parameters.json' deployJob=true containerImage=$image
-
-az deployment sub create --name salesdb-backup-job-132d --location westeurope --template-file .\infra\main.bicep --parameters '@infra/main.parameters.json' deployJob=true containerImage=$image
-
-az containerapp job start --name job-salesdb-dev-132d --resource-group rg-pg-sample
-az containerapp job execution list --name job-salesdb-dev-132d --resource-group rg-pg-sample --query "[].{name:name,status:properties.status,start:properties.startTime,end:properties.endTime}" -o table
-```
-
-A successful start request is not a successful backup. Wait for execution status `Succeeded`. You can inspect container logs directly via Azure CLI or Log Analytics:
+Wait for execution status `Succeeded`. You can inspect container logs directly via Azure CLI or Log Analytics:
 
 ```powershell
 # Option A: Stream logs directly via Container Apps CLI
-az containerapp job logs show --name job-salesdb-dev-132d --resource-group rg-pg-sample --follow
+az containerapp job logs show --name $JOB_NAME --resource-group $RESOURCE_GROUP --follow
 
 # Option B: Query Log Analytics workspace
-$wsId = az monitor log-analytics workspace show -g rg-pg-sample -n log-salesdb-dev-132d --query customerId -o tsv
-az monitor log-analytics query -w $wsId --analytics-query "ContainerAppConsoleLogs_CL | where ContainerJobName_s == 'job-salesdb-dev-132d' | project TimeGenerated, Log_s | order by TimeGenerated desc" -t PT1H -o table
+$wsId = az monitor log-analytics workspace show -g $RESOURCE_GROUP -n "log-pg-backup" --query customerId -o tsv
+az monitor log-analytics query -w $wsId --analytics-query "ContainerAppConsoleLogs_CL | where ContainerJobName_s == '$JOB_NAME' | project TimeGenerated, Log_s | order by TimeGenerated desc" -t PT1H -o table
 ```
 
 ### 5. Verify the stored archive and restore
 
-In storage account `stsalesdbdev132d`, verify a new object under `postgres-backups/salesdb/`. Check metadata `database`, `server`, `bytes` and `sha256`. A human operator needs container-scoped **Storage Blob Data Reader** to list/download through Entra authentication; only the job identity is granted blob access by these templates. Request that scoped operator role if needed, not a storage key.
-
-With that role, list and download the actual blob:
+In your storage account, verify the new backup object under `postgres-backups/<database-name>/`. Check metadata `database`, `server`, `bytes` and `sha256`.
 
 ```powershell
-az storage blob list --account-name stsalesdbdev132d --container-name postgres-backups --auth-mode login --query "[].{name:name,bytes:properties.contentLength,metadata:metadata}" -o json
-# Replace the blob name below with the exact returned path.
-$blobName = "salesdb/salesdb_YYYYMMDD_HHMMSS.dump"
-az storage blob download --account-name stsalesdbdev132d --container-name postgres-backups --name $blobName --file .\salesdb.dump --auth-mode login --overwrite false
-(Get-FileHash .\salesdb.dump -Algorithm SHA256).Hash.ToLowerInvariant()
+$STORAGE_ACCOUNT = "mystorageaccount"
+az storage blob list --account-name $STORAGE_ACCOUNT --container-name postgres-backups --auth-mode login --query "[].{name:name,bytes:properties.contentLength,metadata:metadata}" -o json
+
+# Download and verify hash
+$blobName = "<database-name>/<database-name>_YYYYMMDD_HHMMSS.dump"
+az storage blob download --account-name $STORAGE_ACCOUNT --container-name postgres-backups --name $blobName --file .\database.dump --auth-mode login --overwrite false
+(Get-FileHash .\database.dump -Algorithm SHA256).Hash.ToLowerInvariant()
 ```
 
-Compare the local SHA256 to blob metadata and reject any mismatch. Use PostgreSQL 16 `pg_restore --list` to inspect the archive, then `pg_restore --exit-on-error --no-owner --no-privileges --dbname <disposable-database> .\salesdb.dump` into a **separate isolated PostgreSQL 16 instance** and inspect restored tables/row counts. Never restore into `salesdb` on the source server. For a disposable Docker instance, use a separately installed Docker runtime on your workstation; Docker is not required for the Azure image build.
+Restore into a **separate isolated PostgreSQL 16 instance**:
 
-The scheduled job will continue running at 02:00 UTC. Lifecycle cleanup may run after the 30-day threshold, so expired blobs can remain briefly. Configure failure notifications and recurring restore drills separately before relying on unattended production backups.
+```powershell
+pg_restore --exit-on-error --no-owner --no-privileges --dbname <disposable-database> .\database.dump
+```
