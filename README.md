@@ -4,7 +4,7 @@ A scheduled-job application that creates a verified custom-format backup of a Po
 
 ## Run locally
 
-Requires Python 3.10+, PostgreSQL 16 client tools (`pg_dump` and `pg_restore`), and access to the PostgreSQL server and blob container. Install dependencies from `requirements.txt` and export the environment variables listed in `.env.sample` (`.env` files are not loaded automatically). Set `PGPASSWORD` for local use, or configure a Key Vault URL and secret name. Authenticate to Azure with the Azure CLI or another `DefaultAzureCredential`-supported method.
+Requires Python 3.10+, PostgreSQL 16 or 18 client tools (`pg_dump` and `pg_restore`), and access to the PostgreSQL server and blob container. Use PostgreSQL 18 tools for PostgreSQL 18 servers. Install dependencies from `requirements.txt` and export the environment variables listed in `.env.sample` (`.env` files are not loaded automatically). Set `PGPASSWORD` for local use, or leave it unset for managed identity authentication. Authenticate to Azure with the Azure CLI or another `DefaultAzureCredential`-supported method.
 
 Run the job with:
 
@@ -36,6 +36,25 @@ ghcr.io/hks-ms/azure-postgres-backup:latest
 ```
 
 This image is publicly accessible and can be pulled directly by Azure Container Apps without configuring registry credentials.
+
+For **PostgreSQL 18**, use the separate image:
+
+```text
+ghcr.io/hks-ms/azure-postgres-backup:pg18
+```
+
+`latest` and existing SHA tags retain PostgreSQL 16 clients. The `pg18` image
+contains PostgreSQL 18 `pg_dump` and `pg_restore`; use PostgreSQL 18 restore tools
+and a PostgreSQL 18 or newer destination for its archives. Environment variables
+and managed identity configuration are unchanged. In the Azure portal, edit the
+Container Apps Job's container image to the `pg18` reference and save; this does
+not require changing its schedule or environment variables.
+
+To publish only `pg18`, manually run **Build and Publish Docker Image** in GitHub
+Actions with `postgres_major` set to `18`. This runs unit tests and an isolated
+PostgreSQL 18 dump/restore check before publication, without updating `latest`
+or PostgreSQL 16 SHA tags. Local builds default to PostgreSQL 16; select 18 with
+`docker build --build-arg POSTGRES_MAJOR=18 -t postgres-backup:pg18 .`.
 
 ---
 

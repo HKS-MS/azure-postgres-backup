@@ -4,10 +4,19 @@ on:
   push:
     branches: [ "main" ]
   workflow_dispatch:
+    inputs:
+      postgres_major:
+        description: PostgreSQL client major version to publish
+        type: choice
+        options:
+          - "16"
+          - "18"
+        default: "16"
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  POSTGRES_MAJOR: ${{ inputs.postgres_major || '16' }}
 
 jobs:
   test:
@@ -57,13 +66,52 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,format=short
+            type=raw,value=latest,enable=${{ env.POSTGRES_MAJOR == '16' && github.ref == 'refs/heads/main' }}
+            type=sha,format=short,enable=${{ env.POSTGRES_MAJOR == '16' }}
+            type=raw,value=pg18,enable=${{ env.POSTGRES_MAJOR == '18' }}
+
+      - name: Build PostgreSQL 18 image for compatibility check
+        if: env.POSTGRES_MAJOR == '18'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: postgres-backup:validation
+          build-args: POSTGRES_MAJOR=18
+
+      - name: Verify PostgreSQL 18 dump and restore
+        if: env.POSTGRES_MAJOR == '18'
+        run: |
+          set -euo pipefail
+          trap 'docker rm -f pg18-compat-test' EXIT
+          docker run --detach --name pg18-compat-test \
+            --env POSTGRES_HOST_AUTH_METHOD=trust postgres:18-bookworm
+          for attempt in $(seq 1 60); do
+            if docker exec pg18-compat-test pg_isready -U postgres; then
+              break
+            fi
+            sleep 2
+          done
+          docker run --rm --network container:pg18-compat-test \
+            --env PGHOST=127.0.0.1 --env PGUSER=postgres \
+            --entrypoint sh postgres-backup:validation -ec '
+              pg_dump --version | grep -E "PostgreSQL\) 18\."
+              pg_restore --version | grep -E "PostgreSQL\) 18\."
+              psql -v ON_ERROR_STOP=1 -d postgres -c "CREATE DATABASE backup_source"
+              psql -v ON_ERROR_STOP=1 -d backup_source -c \
+                "CREATE TABLE compatibility_check (id integer PRIMARY KEY); INSERT INTO compatibility_check VALUES (18)"
+              pg_dump --format=custom --dbname=backup_source --file=/tmp/compatibility.dump
+              pg_restore --list /tmp/compatibility.dump
+              psql -v ON_ERROR_STOP=1 -d postgres -c "CREATE DATABASE backup_restored"
+              pg_restore --exit-on-error --no-owner --dbname=backup_restored /tmp/compatibility.dump
+              test "$(psql -At -d backup_restored -c "SELECT id FROM compatibility_check")" = 18
+            '
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
+          build-args: POSTGRES_MAJOR=${{ env.POSTGRES_MAJOR }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

@@ -179,10 +179,10 @@ def run_backup(
             )
             version = version_result.stdout.strip()
             match = re.fullmatch(
-                r"pg_dump \(PostgreSQL\) (16\.[0-9]+)(?: \([^\r\n]+\))?", version
+                r"pg_dump \(PostgreSQL\) ((?:16|18)\.[0-9]+)(?: \([^\r\n]+\))?", version
             )
             if not match:
-                raise RuntimeError("A PostgreSQL 16 pg_dump client is required")
+                raise RuntimeError("A PostgreSQL 16 or 18 pg_dump client is required")
 
             digest, size = _sha256_and_size(archive_path)
             blob_client = blob_service.get_blob_client(

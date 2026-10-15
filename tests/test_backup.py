@@ -121,6 +121,40 @@ class BackupTests(unittest.TestCase):
         credential.get_token.assert_called_once_with(POSTGRES_ENTRA_SCOPE)
         self.assertEqual(calls[0]["env"]["PGPASSWORD"], "ey-entra-access-token")
 
+    def test_postgres_18_client_uploads_with_version_metadata(self):
+        for version in (
+            "pg_dump (PostgreSQL) 18.0",
+            "pg_dump (PostgreSQL) 18.3 (Debian 18.3-1.pgdg12+1)",
+        ):
+            with self.subTest(version=version):
+                def fake_run(args, **kwargs):
+                    if args[0] == "pg_dump" and "--file" in args:
+                        Path(args[args.index("--file") + 1]).write_bytes(b"archive")
+                    return SimpleNamespace(
+                        stdout=version if args == ["pg_dump", "--version"] else ""
+                    )
+
+                _, uploaded, client, _ = self._run(subprocess_run=fake_run)
+                self.assertEqual(uploaded["kwargs"]["metadata"]["pg_version"], version)
+                client.upload_blob.assert_called_once()
+
+    def test_unsupported_client_never_uploads(self):
+        blob_service = Mock()
+
+        def fake_run(args, **kwargs):
+            if args[0] == "pg_dump" and "--file" in args:
+                Path(args[args.index("--file") + 1]).write_bytes(b"archive")
+            return SimpleNamespace(stdout="pg_dump (PostgreSQL) 17.0")
+
+        with self.assertRaisesRegex(RuntimeError, "PostgreSQL 16 or 18"):
+            run_backup(
+                make_config(),
+                credential_factory=lambda **kwargs: Mock(),
+                blob_service_factory=lambda **kwargs: blob_service,
+                subprocess_run=fake_run,
+            )
+        blob_service.get_blob_client.assert_not_called()
+
     def test_subprocess_failure_cleans_temporary_archive_and_does_not_upload(self):
         root = tempfile.TemporaryDirectory()
         created = []

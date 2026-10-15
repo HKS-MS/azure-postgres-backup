@@ -1,4 +1,5 @@
-FROM postgres:16-bookworm
+ARG POSTGRES_MAJOR=16
+FROM postgres:${POSTGRES_MAJOR}-bookworm
 
 USER root
 RUN apt-get update \
